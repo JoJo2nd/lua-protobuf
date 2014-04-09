@@ -1,2 +1,5 @@
 lua_protobuf/*.pyc
 
+/build/
+/dist/
+/lua_protobuf.egg-info/

@@ -3,3 +3,6 @@ Copyright (c) 2011, Gregory Szorc <gregory.szorc@gmail.com>
 All rights reserved.
 
 Future contributors will be listed here.
+
+James Moran <jojo(dot)2nd(dot)jm(at)gmail(dot)com>
+Modified to work better with Lua 5.2

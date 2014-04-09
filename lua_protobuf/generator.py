@@ -12,6 +12,10 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+# Modified by James Moran 2014
+# Updated to work with Lua 5.2. Fixing windows platform issues.
+# Added wrapper classes for CodedInput/OutputStream(s)
+
 from google.protobuf.descriptor import FieldDescriptor
 import re
 
@@ -70,14 +74,17 @@ extern "C" {
 // collection on a message instance.
 // if called function returns 1, Lua will free the memory backing the object
 // if returns 0, Lua will not free the memory
-typedef int (*lua_protobuf_gc_callback)(::google::protobuf::Message *msg, void *userdata);
+typedef int (*lua_protobuf_gc_callback)(::google::protobuf::MessageLite *msg, void *userdata);
 
 // __index and __newindex functions for enum tables
 LUA_PROTOBUF_EXPORT int lua_protobuf_enum_index(lua_State *L);
 LUA_PROTOBUF_EXPORT int lua_protobuf_enum_newindex(lua_State *L);
 
 // GC callback function that always returns true
-LUA_PROTOBUF_EXPORT int lua_protobuf_gc_always_free(::google::protobuf::Message *msg, void *userdata);
+LUA_PROTOBUF_EXPORT int lua_protobuf_gc_always_free(::google::protobuf::MessageLite *msg, void *userdata);
+
+// A minimal Lua interface for coded input/output protobuf streams
+int lua_protobuf_coded_streams_open(lua_State* L);
 
 #ifdef __cplusplus
 }
@@ -113,10 +120,314 @@ int lua_protobuf_enum_newindex(lua_State *L)
     return luaL_error(L, "cannot modify enumeration tables");
 }
 
-int lua_protobuf_gc_always_free(::google::protobuf::Message *msg, void *ud)
+int lua_protobuf_gc_always_free(::google::protobuf::MessageLite *msg, void *ud)
 {
     return 1;
 }
+
+#include "google/protobuf/io/coded_stream.h"
+#include "google/protobuf/io/zero_copy_stream_impl.h"
+#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
+#include <fcntl.h>
+
+#if defined (_MSC_VER)
+#   include <io.h> // for open
+#   include <sys/stat.h> // for open
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+
+int lua_protobuf_coded_input_stream_new(lua_State* L) {
+    const char* filepath = luaL_checkstring(L, 1);
+    int fd = open(filepath, O_RDONLY | O_BINARY, S_IREAD);
+    if (fd == -1) {
+        return luaL_error(L, "Failed to open file %s", filepath);
+    }
+    char* udataptr = (char*)lua_newuserdata(L, sizeof(::google::protobuf::io::CodedInputStream)+sizeof(::google::protobuf::io::FileInputStream));
+    auto instream = new (udataptr+sizeof(::google::protobuf::io::FileInputStream)) ::google::protobuf::io::FileInputStream(fd);
+    instream->SetCloseOnDelete(true);
+    auto codestream = new (udataptr) ::google::protobuf::io::CodedInputStream(instream);
+    luaL_setmetatable(L, "protobuf_.CodedInputStream");
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_gc(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    ::google::protobuf::io::FileInputStream* filestream = (::google::protobuf::io::FileInputStream*)(codestream+1);
+    codestream->~CodedInputStream();
+    filestream->~FileInputStream();
+    return 0;
+}
+
+int lua_protobuf_coded_input_stream_skip(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    int count = luaL_checkint(L, 2);
+    codestream->Skip(count);
+    return 0;
+}
+
+int lua_protobuf_coded_input_stream_push_limit(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    int limit = luaL_checkint(L, 2);
+    limit = codestream->PushLimit(limit);
+    lua_pushinteger(L, limit);
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_pop_limit(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    int limit = luaL_checkint(L, 2);
+    codestream->PopLimit(limit);
+    return 0;
+}
+
+int lua_protobuf_coded_input_stream_current_position(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    lua_pushinteger(L, codestream->CurrentPosition());
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_read_raw(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    int count = luaL_checkint(L, 2);
+    char* buf = new char[count];
+    bool success = codestream->ReadRaw(buf, count);
+    if (success) {
+        lua_pushlstring(L, buf, count);
+    } else {
+        lua_pushnil(L);
+    }
+    delete buf;
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_read_varint_32(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    ::google::protobuf::uint32 val;
+    bool success = codestream->ReadVarint32(&val);
+    lua_pushboolean(L, success);
+    if (success) {
+        lua_pushinteger(L, val);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_read_varint_64(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    ::google::protobuf::uint64 val;
+    bool success = codestream->ReadVarint64(&val);
+    lua_pushboolean(L, success);
+    if (success) {
+        lua_pushinteger(L, val);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_read_little_endian_32(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    ::google::protobuf::uint32 val;
+    bool success = codestream->ReadLittleEndian32(&val);
+    lua_pushboolean(L, success);
+    if (success) {
+        lua_pushinteger(L, val);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int lua_protobuf_coded_input_stream_read_little_endian_64(lua_State* L) {
+    ::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, "protobuf_.CodedInputStream");
+    ::google::protobuf::uint64 val;
+    bool success = codestream->ReadLittleEndian64(&val);
+    lua_pushboolean(L, success);
+    if (success) {
+        lua_pushinteger(L, val);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+static const struct luaL_Reg CodedInputStream_functions [] = {
+    {"new", lua_protobuf_coded_input_stream_new},
+    {NULL, NULL}
+};
+
+static const struct luaL_Reg CodedInputStream_methods [] = {
+    {"__gc", lua_protobuf_coded_input_stream_gc},
+    {"Skip", lua_protobuf_coded_input_stream_skip},
+    {"PushLimit", lua_protobuf_coded_input_stream_push_limit},
+    {"PopLimit", lua_protobuf_coded_input_stream_pop_limit},
+    {"CurrentPosition", lua_protobuf_coded_input_stream_current_position},
+    {"ReadRaw", lua_protobuf_coded_input_stream_read_raw},
+    {"ReadVarint32", lua_protobuf_coded_input_stream_read_varint_32},
+    {"ReadVarint64", lua_protobuf_coded_input_stream_read_varint_64},
+    {"ReadLittleEndian32", lua_protobuf_coded_input_stream_read_little_endian_32},
+    {"ReadLittleEndian64", lua_protobuf_coded_input_stream_read_little_endian_64},
+    {NULL, NULL},
+};
+
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+
+int lua_protobuf_coded_output_stream_new(lua_State* L) {
+    const char* filepath = luaL_checkstring(L, 1);
+    int fd = open(filepath, O_WRONLY | O_TRUNC | O_CREAT | O_BINARY, S_IREAD | S_IWRITE);
+    if (fd == -1) {
+        return luaL_error(L, "Failed to open file %s", filepath);
+    }
+    char* udataptr = (char*)lua_newuserdata(L, sizeof(::google::protobuf::io::CodedOutputStream)+sizeof(::google::protobuf::io::FileOutputStream));
+    auto outstream = new(udataptr+sizeof(::google::protobuf::io::CodedOutputStream)) ::google::protobuf::io::FileOutputStream(fd);
+    outstream->SetCloseOnDelete(true);
+    auto codestream = new (udataptr) ::google::protobuf::io::CodedOutputStream(outstream);
+    luaL_setmetatable(L, "protobuf_.CodedOutputStream");
+    return 1;
+}
+
+int lua_protobuf_coded_output_stream_gc(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    ::google::protobuf::io::FileOutputStream* filestream = (::google::protobuf::io::FileOutputStream*)(codestream+1);
+    codestream->~CodedOutputStream();
+    filestream->~FileOutputStream();
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_skip(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    int count = luaL_checkint(L, 2);
+    codestream->Skip(count);
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_byte_count(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    lua_pushinteger(L, codestream->ByteCount());
+    return 1;
+}
+
+int lua_protobuf_coded_output_stream_write_raw(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    size_t count;
+    const char* buf = luaL_checklstring(L, 2, &count);
+    codestream->WriteRaw(buf, (int)count);
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_write_varint_32(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    ::google::protobuf::uint32 val = luaL_checkunsigned(L, 2);
+    codestream->WriteVarint32(val);
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_write_varint_64(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    ::google::protobuf::uint64 val = luaL_checkunsigned(L, 2);
+    codestream->WriteVarint64(val);
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_write_little_endian_32(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    ::google::protobuf::uint32 val = luaL_checkunsigned(L, 2);
+    codestream->WriteLittleEndian32(val);
+    return 0;
+}
+
+int lua_protobuf_coded_output_stream_write_little_endian_64(lua_State* L) {
+    ::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, "protobuf_.CodedOutputStream");
+    ::google::protobuf::uint64 val = luaL_checkunsigned(L, 2);
+    codestream->WriteLittleEndian64(val);
+    return 0;
+}
+
+static const struct luaL_Reg CodedOutputStream_functions [] = {
+    {"new", lua_protobuf_coded_output_stream_new},
+    {NULL, NULL}
+};
+
+static const struct luaL_Reg CodedOutputStream_methods [] = {
+    {"__gc", lua_protobuf_coded_output_stream_gc},
+    {"Skip", lua_protobuf_coded_output_stream_skip},
+    {"ByteCount", lua_protobuf_coded_output_stream_byte_count},
+    {"WriteRaw", lua_protobuf_coded_output_stream_write_raw},
+    {"WriteVarint32", lua_protobuf_coded_output_stream_write_varint_32},
+    {"WriteVarint64", lua_protobuf_coded_output_stream_write_varint_64},
+    {"WriteLittleEndian32", lua_protobuf_coded_output_stream_write_little_endian_32},
+    {"WriteLittleEndian64", lua_protobuf_coded_output_stream_write_little_endian_64},
+    {NULL, NULL},
+};
+
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////
+
+static const struct luaL_Reg CodedInputStream_lib_functions [] = {
+    {NULL, NULL}
+};
+
+int lua_protobuf_coded_streams_open(lua_State* L) {
+    luaL_checktype(L, -1, LUA_TTABLE);
+
+    luaL_newmetatable(L, "protobuf_.CodedInputStream");
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, CodedInputStream_methods, 0);
+    lua_pop(L, 1);//pop the metatable
+
+    luaL_newmetatable(L, "protobuf_.CodedOutputStream");
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, CodedOutputStream_methods, 0);
+    lua_pop(L, 1);//pop the metatable
+
+    // add create funcs and tables
+    luaL_newlib(L, CodedInputStream_functions);
+    lua_setfield(L, -2, "CodedInputStream");
+    luaL_newlib(L, CodedOutputStream_functions);
+    lua_setfield(L, -2, "CodedOutputStream");
+    return 0;
+}
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+const char *luaEXT_findtable (lua_State *L, const char *fname, int idx, int szhint) {
+  const char *e;
+  if (idx) lua_pushvalue(L, idx);
+  do {
+    e = strchr(fname, '.');
+    if (e == NULL) e = fname + strlen(fname);
+    lua_pushlstring(L, fname, e - fname);
+    lua_rawget(L, -2);
+    if (lua_isnil(L, -1)) {  /* no such field? */
+      lua_pop(L, 1);  /* remove this nil */
+      lua_createtable(L, 0, (*e == '.' ? 1 : szhint)); /* new table for field */
+      lua_pushlstring(L, fname, e - fname);
+      lua_pushvalue(L, -2);
+      lua_settable(L, -4);  /* set new table into field */
+    }
+    else if (!lua_istable(L, -1)) {  /* field has a non-table value? */
+      lua_pop(L, 2);  /* remove table and value */
+      return fname;  /* return problematic part of the name */
+    }
+    lua_remove(L, -2);  /* remove previous table */
+    fname = e + 1;
+  } while (*e == '.');
+  return NULL;
+}
+
+#ifdef __cplusplus
+}
+#endif
 
 '''
 
@@ -127,11 +438,11 @@ def c_header_header(filename, package):
         '//',
         '// source proto file: %s' % filename,
         '',
-        '#ifndef LUA_PROTOBUF_%s_H' % package.replace('.', '_'),
-        '#define LUA_PROTOBUF_%s_H' % package.replace('.', '_'),
+        '#ifndef LUA_PROTOBUF_%s_%s_H' % (package.replace('.', '_'), filename.replace('.proto', '')),
+        '#define LUA_PROTOBUF_%s_%s_H' % (package.replace('.', '_'), filename.replace('.proto', '')),
         '',
         '#include "lua-protobuf.h"',
-        '#include <%s.pb.h>' % package.replace('.', '/'),
+        '#include <%s.pb.h>' % filename.replace('.proto', ''),#package.replace('.', '_'),
         '',
         '#ifdef __cplusplus',
         'extern "C" {',
@@ -139,21 +450,29 @@ def c_header_header(filename, package):
         '',
         '#include <lua.h>',
         '',
+        'const char* luaEXT_findtable (lua_State*, const char*, int, int);',
+        '',
+        ## We do this function based on file name to avoid name collisions
         '// register all messages in this package to a Lua state',
-        'LUA_PROTOBUF_EXPORT int %sopen(lua_State *L);' % package_function_prefix(package),
+        'LUA_PROTOBUF_EXPORT int %sopen(lua_State *L);' % proto_function_open_name(filename),
         '',
     ]
 
-def source_header(filename, package):
+def source_header(filename, package, file_descriptor):
     '''Returns lines that begin a source file'''
-    return [
+    lines = []
+
+    lines.extend( [
         '// Generated by the lua-protobuf compiler',
         '// You shouldn\'t edit this file manually',
         '//',
         '// source proto file: %s' % filename,
         '',
-        '#include "%s.pb-lua.h"' % package.replace('.', '/'),
-        '',
+        ])
+    lines.append('#include "%s.pb.lua.h"' % filename.replace('.proto', ''))
+    for type in file_descriptor.dependency:
+        lines.append('#include "%s.pb.lua.h"' % type.replace('.proto', ''))
+    lines.extend( ['',
         '#ifdef __cplusplus',
         'extern "C" { // make sure functions treated with C naming',
         '#endif',
@@ -169,14 +488,17 @@ def source_header(filename, package):
         '// this represents Lua udata for a protocol buffer message',
         '// we record where a message came from so we can GC it properly',
         'typedef struct msg_udata { // confuse over-simplified pretty-printer',
-        '    ::google::protobuf::Message * msg;',
+        '    ::google::protobuf::MessageLite * msg;',
         '    bool lua_owns;',
         '    lua_protobuf_gc_callback gc_callback;',
         '    void * callback_data;',
         '} msg_udata;',
-        '',
-    ]
+        '',])
+    return lines
 
+def proto_function_open_name(filename):
+    return 'lua_protobuf_%s_' % filename.replace('.proto', '')
+    
 def package_function_prefix(package):
     return 'lua_protobuf_%s_' % package.replace('.', '_')
 
@@ -204,7 +526,7 @@ def field_function_name(package, message, prefix, field):
 def field_function_start(package, message, prefix, field):
     '''Obtain the start of function for a field accessor function'''
     return [
-        'int %s(lua_State *L)' % field_function_name(package, message, prefix, field),
+        'int %s(lua_State *L)' % field_function_name(package, message, prefix, field.lower()),
         '{',
     ]
 
@@ -239,7 +561,7 @@ def has_body(package, message, field):
 
     lines = []
     lines.extend(obtain_message_from_udata(package, message))
-    lines.append('lua_pushboolean(L, m->has_%s());' % field)
+    lines.append('lua_pushboolean(L, m->has_%s());' % field.lower())
     lines.append('return 1;')
 
     return lines
@@ -248,7 +570,7 @@ def clear_body(package, message, field):
     '''Returns the function body for a clear_<field> function'''
     lines = []
     lines.extend(obtain_message_from_udata(package, message))
-    lines.append('m->clear_%s();' % field)
+    lines.append('m->clear_%s();' % field.lower())
     lines.append('return 0;')
 
     return lines
@@ -257,7 +579,7 @@ def size_body(package, message, field):
     '''Returns the function body for a size_<field> function'''
     lines = []
     lines.extend(obtain_message_from_udata(package, message))
-    lines.append('int size = m->%s_size();' % field)
+    lines.append('int size = m->%s_size();' % field.lower())
     lines.append('lua_pushinteger(L, size);')
     lines.append('return 1;')
 
@@ -268,7 +590,7 @@ def add_body(package, message, field, type_name):
     lines = []
     lines.extend(obtain_message_from_udata(package, message))
     lines.extend([
-        '%s *msg_new = m->add_%s();' % ( cpp_class(type_name), field ),
+        '%s *msg_new = m->add_%s();' % ( cpp_class(type_name), field.lower() ),
 
         # since the message is allocated out of the containing message, Lua
         # does not need to do GC
@@ -303,9 +625,9 @@ def field_get(package, message, field_descriptor):
                 'return luaL_error(L, "missing required numeric argument");',
             '}',
             'lua_Integer index = luaL_checkinteger(L, 2);',
-            'if (index < 1 || index > m->%s_size()) {' % name,
+            'if (index < 1 || index > m->%s_size()) {' % name.lower(),
                 # TODO is returning nil the more Lua way?
-                'return luaL_error(L, "index must be between 1 and current size: %%d", m->%s_size());' % name,
+                'return luaL_error(L, "index must be between 1 and current size: %%d", m->%s_size());' % name.lower(),
             '}',
         ])
 
@@ -315,30 +637,30 @@ def field_get(package, message, field_descriptor):
     if repeated:
         if type in [ FieldDescriptor.TYPE_STRING, FieldDescriptor.TYPE_BYTES ]:
             lines.extend([
-                'string s = m->%s(index - 1);' % name,
+                'string s = m->%s(index - 1);' % name.lower(),
                 'lua_pushlstring(L, s.c_str(), s.size());',
             ])
         elif type == FieldDescriptor.TYPE_BOOL:
-            lines.append('lua_pushboolean(L, m->%s(index-1));' % name)
+            lines.append('lua_pushboolean(L, m->%s(index-1));' % name.lower())
 
         elif type in [FieldDescriptor.TYPE_INT32, FieldDescriptor.TYPE_UINT32,
             FieldDescriptor.TYPE_FIXED32, FieldDescriptor.TYPE_SFIXED32, FieldDescriptor.TYPE_SINT32]:
 
-            lines.append('lua_pushinteger(L, m->%s(index-1));' % name)
+            lines.append('lua_pushinteger(L, m->%s(index-1));' % name.lower())
 
         elif type in [ FieldDescriptor.TYPE_INT64, FieldDescriptor.TYPE_UINT64,
             FieldDescriptor.TYPE_FIXED64, FieldDescriptor.TYPE_SFIXED64, FieldDescriptor.TYPE_SINT64]:
-            lines.append('lua_pushinteger(L, m->%s(index-1));' % name)
+            lines.append('lua_pushinteger(L, m->%s(index-1));' % name.lower())
 
         elif type == FieldDescriptor.TYPE_FLOAT or type == FieldDescriptor.TYPE_DOUBLE:
-            lines.append('lua_pushnumber(L, m->%s(index-1));' % name)
+            lines.append('lua_pushnumber(L, m->%s(index-1));' % name.lower())
 
         elif type == FieldDescriptor.TYPE_ENUM:
-            lines.append('lua_pushnumber(L, m->%s(index-1));' % name)
+            lines.append('lua_pushnumber(L, m->%s(index-1));' % name.lower())
 
         elif type == FieldDescriptor.TYPE_MESSAGE:
             lines.extend([
-                '%s * got_msg = m->mutable_%s(index-1);' % ( type_name.replace('.', '::'), name ),
+                '%s * got_msg = m->mutable_%s(index-1);' % ( type_name.replace('.', '::'), name.lower() ),
                 'lua_protobuf%s_pushreference(L, got_msg, NULL, NULL);' % type_name.replace('.', '_'),
             ])
 
@@ -348,36 +670,36 @@ def field_get(package, message, field_descriptor):
         # for scalar fields, we push nil if the value is not defined
         # this is the Lua way
         if type == FieldDescriptor.TYPE_STRING or type == FieldDescriptor.TYPE_BYTES:
-            lines.append('string s = m->%s();' % name)
-            lines.append('m->has_%s() ? lua_pushlstring(L, s.c_str(), s.size()) : lua_pushnil(L);' % name)
+            lines.append('string s = m->%s();' % name.lower())
+            lines.append('m->has_%s() ? lua_pushlstring(L, s.c_str(), s.size()) : lua_pushnil(L);' % name.lower())
 
         elif type == FieldDescriptor.TYPE_BOOL:
-            lines.append('m->has_%s() ? lua_pushboolean(L, m->%s()) : lua_pushnil(L);' % ( name, name ))
+            lines.append('m->has_%s() ? lua_pushboolean(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type in [FieldDescriptor.TYPE_INT32, FieldDescriptor.TYPE_UINT32,
             FieldDescriptor.TYPE_FIXED32, FieldDescriptor.TYPE_SFIXED32, FieldDescriptor.TYPE_SINT32]:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name, name ))
+            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type in [ FieldDescriptor.TYPE_INT64, FieldDescriptor.TYPE_UINT64,
             FieldDescriptor.TYPE_FIXED64, FieldDescriptor.TYPE_SFIXED64, FieldDescriptor.TYPE_SINT64]:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name, name ))
+            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_FLOAT or type == FieldDescriptor.TYPE_DOUBLE:
-            lines.append('m->has_%s() ? lua_pushnumber(L, m->%s()) : lua_pushnil(L);' % ( name, name ))
+            lines.append('m->has_%s() ? lua_pushnumber(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_ENUM:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name, name ))
+            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_MESSAGE:
             lines.extend([
-                'if (!m->has_%s()) {' % name,
+                'if (!m->has_%s()) {' % name.lower(),
                     'lua_pushnil(L);',
                 '}',
 
                 # we push the message as userdata
                 # since the message is allocated out of the parent message, we
                 # don't need to do garbage collection
-                '%s * got_msg = m->mutable_%s();' % ( type_name.replace('.', '::'), name ),
+                '%s * got_msg = m->mutable_%s();' % ( type_name.replace('.', '::'), name.lower() ),
                 'lua_protobuf%s_pushreference(L, got_msg, NULL, NULL);' % type_name.replace('.', '_'),
             ])
 
@@ -393,10 +715,10 @@ def field_get(package, message, field_descriptor):
 def field_set_assignment(field, args):
     return [
         'if (index == current_size + 1) {',
-            'm->add_%s(%s);' % ( field, args ),
+            'm->add_%s(%s);' % ( field.lower(), args ),
         '}',
         'else {',
-            'm->set_%s(index-1, %s);' % ( field, args ),
+            'm->set_%s(index-1, %s);' % ( field.lower(), args ),
         '}',
     ]
 
@@ -410,7 +732,7 @@ def field_set(package, message, field_descriptor):
     repeated = label == FieldDescriptor.LABEL_REPEATED
 
     lines = []
-    lines.extend(field_function_start(package, message, 'set', name))
+    lines.extend(field_function_start(package, message, 'set', name.lower()))
     lines.extend(obtain_message_from_udata(package, message, 1))
 
     # we do things differently depending on if this is a singular or repeated field
@@ -422,7 +744,7 @@ def field_set(package, message, field_descriptor):
             '    return luaL_error(L, "required 2 arguments not passed to function");',
             '}',
             'lua_Integer index = luaL_checkinteger(L, 2);',
-            'int current_size = m->%s_size();' % name,
+            'int current_size = m->%s_size();' % name.lower(),
             'if (index < 1 || index > current_size + 1) {',
                 'return luaL_error(L, "index must be between 1 and %d", current_size + 1);',
             '}',
@@ -445,7 +767,7 @@ def field_set(package, message, field_descriptor):
             lines.extend(field_set_assignment(name, 's, length'))
 
         elif type == FieldDescriptor.TYPE_BOOL:
-            lines.append('bool b = lua_toboolean(L, 3);')
+            lines.append('bool b = !!lua_toboolean(L, 3);')
             lines.extend(field_set_assignment(name, 'b'))
 
         elif type in [ FieldDescriptor.TYPE_DOUBLE, FieldDescriptor.TYPE_FLOAT ]:
@@ -480,7 +802,7 @@ def field_set(package, message, field_descriptor):
         # this is the Lua way, after all
         lines.extend([
             'if (lua_isnil(L, 2)) {',
-                'm->clear_%s();' % name,
+                'm->clear_%s();' % name.lower(),
                 'return 0;',
             '}',
             '',
@@ -494,7 +816,7 @@ def field_set(package, message, field_descriptor):
                 'if (!s) {',
                     'luaL_error(L, "could not obtain string on stack. weird");',
                 '}',
-                'm->set_%s(s, len);' % name,
+                'm->set_%s(s, len);' % name.lower(),
                 'return 0;',
             ])
 
@@ -502,7 +824,7 @@ def field_set(package, message, field_descriptor):
             lines.extend([
                 'if (!lua_isnumber(L, 2)) return luaL_error(L, "passed value cannot be converted to a number");',
                 'lua_Number n = lua_tonumber(L, 2);',
-                'm->set_%s(n);' % name,
+                'm->set_%s(n);' % name.lower(),
                 'return 0;',
             ])
 
@@ -511,7 +833,7 @@ def field_set(package, message, field_descriptor):
 
             lines.extend([
                 'lua_Integer v = luaL_checkinteger(L, 2);',
-                'm->set_%s(v);' % name,
+                'm->set_%s(v);' % name.lower(),
                 'return 0;',
             ])
 
@@ -520,21 +842,21 @@ def field_set(package, message, field_descriptor):
 
             lines.extend([
                 'lua_Integer i = luaL_checkinteger(L, 2);',
-                'm->set_%s(i);' % name,
+                'm->set_%s(i);' % name.lower(),
                 'return 0;',
             ])
 
         elif type == FieldDescriptor.TYPE_BOOL:
             lines.extend([
-                'bool b = lua_toboolean(L, 2);',
-                'm->set_%s(b);' % name,
+                'bool b = !!lua_toboolean(L, 2);',
+                'm->set_%s(b);' % name.lower(),
                 'return 0;',
             ])
 
         elif type == FieldDescriptor.TYPE_ENUM:
             lines.extend([
                 'lua_Integer i = luaL_checkinteger(L, 2);',
-                'm->set_%s((%s)i);' % ( name, type_name.replace('.', '::') ),
+                'm->set_%s((%s)i);' % ( name.lower(), type_name.replace('.', '::') ),
                 'return 0;',
             ])
 
@@ -640,6 +962,86 @@ def parsefromstring_message_function(package, message):
     ])
 
     return lines
+    
+def label_to_string(label_value):
+    if label_value == FieldDescriptor.LABEL_OPTIONAL:
+        return "optional"
+    if label_value == FieldDescriptor.LABEL_REPEATED:
+        return "repeated"
+    if label_value == FieldDescriptor.LABEL_REQUIRED:
+        return "required"
+        
+def type_to_string(type_value):
+    if type_value == FieldDescriptor.TYPE_BOOL:# = 8
+        return "bool"
+    if type_value == FieldDescriptor.TYPE_BYTES:# = 12
+        return "bytes"
+    if type_value == FieldDescriptor.TYPE_DOUBLE:# = 1
+        return "double"
+    if type_value == FieldDescriptor.TYPE_ENUM:# = 14
+        return "enum"
+    if type_value == FieldDescriptor.TYPE_FIXED32:# = 7
+        return "fixed32"
+    if type_value == FieldDescriptor.TYPE_FIXED64:# = 6
+        return "fixed64"
+    if type_value == FieldDescriptor.TYPE_FLOAT:# = 2
+        return "float"
+    if type_value == FieldDescriptor.TYPE_GROUP:# = 10
+        return "group"
+    if type_value == FieldDescriptor.TYPE_INT32:# = 5
+        return "int32"
+    if type_value == FieldDescriptor.TYPE_INT64:# = 3
+        return "int64"
+    if type_value == FieldDescriptor.TYPE_MESSAGE:# = 11
+        return "message"
+    if type_value == FieldDescriptor.TYPE_SFIXED32:# = 15
+        return "sfixed32"
+    if type_value == FieldDescriptor.TYPE_SFIXED64:# = 16
+        return "sfixed64"
+    if type_value == FieldDescriptor.TYPE_SINT32:# = 17
+        return "sint32"
+    if type_value == FieldDescriptor.TYPE_SINT64:# = 18
+        return "sint64"
+    if type_value == FieldDescriptor.TYPE_STRING:# = 9
+        return "string"
+    if type_value == FieldDescriptor.TYPE_UINT32:# = 13
+        return "uint32"
+    if type_value == FieldDescriptor.TYPE_UINT64:# = 4
+        return "uint64"
+    
+def descriptor_message_function(package, message, descriptor):
+    ''' Return a function that builds a table that describes message. Returns table to Lua for inspection'''
+    lines = []
+    
+    lines.extend([
+        'int %sdescriptor(lua_State* L)' % message_function_prefix(package, message),
+        '{',
+        '   lua_newtable(L);',
+        '   ',
+    ]);        
+    for fields_descriptor in descriptor.field:
+        lines.extend([
+            '   // Field: default_value = %s' % fields_descriptor.default_value,
+            '   lua_newtable(L);',
+            '   lua_pushstring(L, "%s");' % fields_descriptor.name,
+            '   lua_setfield(L, -2, "name");',
+            '   lua_pushstring(L, "%s");' % label_to_string(fields_descriptor.label),
+            '   lua_setfield(L, -2, "label");',
+            '   lua_pushnumber(L, %s);' % fields_descriptor.number,
+            '   lua_setfield(L, -2, "number");',
+            '   lua_pushstring(L, "%s");' % type_to_string(fields_descriptor.type),
+            '   lua_setfield(L, -2, "type");',
+            '   lua_pushstring(L, "%s");' % (fields_descriptor.type_name) if fields_descriptor.type_name else '',
+            '   lua_setfield(L, -2, "type_name");' if fields_descriptor.type_name else '',
+            '   lua_setfield(L, -2, "%s");' % fields_descriptor.name,
+        ]);
+    
+    lines.extend([
+        '',
+        '   return 1;',
+        '}',
+    ])
+    return lines
 
 def gc_message_function(package, message):
     '''Returns function definition for garbage collecting a message'''
@@ -685,7 +1087,7 @@ def clear_message_function(package, message):
     return lines
 
 def serialized_message_function(package, message):
-    '''Returns the function definition for serializing a message'''
+    '''Returns the function definition for serializing a message and its length'''
 
     lines = [
         'int %sserialized(lua_State *L)' % message_function_prefix(package, message),
@@ -698,7 +1100,8 @@ def serialized_message_function(package, message):
         'return luaL_error(L, "error serializing message");',
         '}',
         'lua_pushlstring(L, s.c_str(), s.length());',
-        'return 1;',
+        'lua_pushnumber(L, s.length());',
+        'return 2;',
         '}',
     ])
 
@@ -714,6 +1117,7 @@ def message_function_array(package, message):
         'static const struct luaL_Reg %s_functions [] = {' % message,
         '{"new", %snew},' % message_function_prefix(package, message),
         '{"parsefromstring", %sparsefromstring},' % message_function_prefix(package, message),
+        '{"descriptor", %sdescriptor},' % message_function_prefix(package, message),
         '{NULL, NULL}',
         '};\n',
     ]
@@ -739,18 +1143,18 @@ def message_method_array(package, descriptor):
         label = fd.label
         type = fd.type
 
-        lines.append('{"clear_%s", %s},' % ( name, field_function_name(package, message, 'clear', name) ))
-        lines.append('{"get_%s", %s},' % ( name, field_function_name(package, message, 'get', name) ))
-        lines.append('{"set_%s", %s},' % ( name, field_function_name(package, message, 'set', name) ))
+        lines.append('{"clear_%s", %s},' % ( name.lower(), field_function_name(package, message, 'clear', name.lower()) ))
+        lines.append('{"get_%s", %s},' % ( name.lower(), field_function_name(package, message, 'get', name.lower()) ))
+        lines.append('{"set_%s", %s},' % ( name.lower(), field_function_name(package, message, 'set', name.lower()) ))
 
         if label in [ FieldDescriptor.LABEL_REQUIRED, FieldDescriptor.LABEL_OPTIONAL ]:
-            lines.append('{"has_%s", %s},' % ( name, field_function_name(package, message, 'has', name) ))
+            lines.append('{"has_%s", %s},' % ( name.lower(), field_function_name(package, message, 'has', name.lower()) ))
 
         if label == FieldDescriptor.LABEL_REPEATED:
-            lines.append('{"size_%s", %s},' % ( name, field_function_name(package, message, 'size', name) ))
+            lines.append('{"size_%s", %s},' % ( name.lower(), field_function_name(package, message, 'size', name.lower()) ))
 
             if type == FieldDescriptor.TYPE_MESSAGE:
-                lines.append('{"add_%s", %s},' % ( name, field_function_name(package, message, 'add', name) ))
+                lines.append('{"add_%s", %s},' % ( name.lower(), field_function_name(package, message, 'add', name.lower()) ))
 
     lines.append('{NULL, NULL},')
     lines.append('};\n')
@@ -765,11 +1169,18 @@ def message_open_function(package, descriptor):
     lines = [
         'int %s(lua_State *L)' % message_open_function_name(package, message),
         '{',
+        'luaL_checktype(L, -1, LUA_TTABLE);', #
         'luaL_newmetatable(L, "%s");' % metatable(package, message),
         'lua_pushvalue(L, -1);',
         'lua_setfield(L, -2, "__index");',
-        'luaL_register(L, NULL, %s_methods);' % message,
-        'luaL_register(L, "%s", %s_functions);' % (lua_libname(package, message), message),
+        'luaL_setfuncs(L, %s_methods, 0);' % message, ##'luaL_register(L, NULL, %s_methods);' % message,
+        'lua_pop(L, 1); // remove the metatable', #
+        'if (luaEXT_findtable(L, "%s", -1, 1)) { ' % package, #
+        '   return luaL_error(L, "Error finding correct table");',
+        '}',
+        'luaL_newlib(L, %s_functions);' % message, ##'luaL_register(L, "%s", %s_functions);' % (lua_libname(package, message), message),
+        'lua_setfield(L, -2, "%s");' % message, #
+        'lua_pop(L, 1); //remove the returned table from findtable' #
     ]
 
     for enum_descriptor in descriptor.enum_type:
@@ -777,8 +1188,8 @@ def message_open_function(package, descriptor):
 
     lines.extend([
         # this is wrong if we are calling through normal Lua module load means
-        'lua_pop(L, 1);',
-        'return 1;',
+        #'lua_pop(L, 1);',
+        'return 0;',#'return 1;',
         '}',
         '\n',
     ])
@@ -825,6 +1236,9 @@ def message_header(package, message_descriptor):
         '// obtain instance from a serialized string',
         'LUA_PROTOBUF_EXPORT int %s%s_parsefromstring(lua_State *L);' % ( function_prefix, message_name ),
         '',
+        '// obtain table of fields in this message',
+        'LUA_PROTOBUF_EXPORT int %s%s_descriptor(lua_State* L);' % ( function_prefix, message_name),
+        '',
         '// garbage collects message instance in Lua',
         'LUA_PROTOBUF_EXPORT int %s%s_gc(lua_State *L);' % ( function_prefix, message_name ),
         '',
@@ -855,20 +1269,20 @@ def message_header(package, message_descriptor):
         field_type_s = FIELD_TYPE_MAP[field_type]
 
         lines.append('// %s %s %s = %d' % (field_label_s, field_type_s, field_name, field_number))
-        lines.append('LUA_PROTOBUF_EXPORT int %s%s_clear_%s(lua_State *L);' % (function_prefix, message_name, field_name))
-        lines.append('LUA_PROTOBUF_EXPORT int %s%s_get_%s(lua_State *L);' % (function_prefix, message_name, field_name))
+        lines.append('LUA_PROTOBUF_EXPORT int %s%s_clear_%s(lua_State *L);' % (function_prefix, message_name, field_name.lower()))
+        lines.append('LUA_PROTOBUF_EXPORT int %s%s_get_%s(lua_State *L);' % (function_prefix, message_name, field_name.lower()))
 
         # TODO I think we can get rid of this for message types
-        lines.append('LUA_PROTOBUF_EXPORT int %s%s_set_%s(lua_State *L);' % (function_prefix, message_name, field_name))
+        lines.append('LUA_PROTOBUF_EXPORT int %s%s_set_%s(lua_State *L);' % (function_prefix, message_name, field_name.lower()))
 
         if field_label in [ FieldDescriptor.LABEL_REQUIRED, FieldDescriptor.LABEL_OPTIONAL ]:
-            lines.append('LUA_PROTOBUF_EXPORT int %s%s_has_%s(lua_State *L);' % (function_prefix, message_name, field_name))
+            lines.append('LUA_PROTOBUF_EXPORT int %s%s_has_%s(lua_State *L);' % (function_prefix, message_name, field_name.lower()))
 
         if field_label == FieldDescriptor.LABEL_REPEATED:
-            lines.append('LUA_PROTOBUF_EXPORT int %s%s_size_%s(lua_State *L);' % (function_prefix, message_name, field_name))
+            lines.append('LUA_PROTOBUF_EXPORT int %s%s_size_%s(lua_State *L);' % (function_prefix, message_name, field_name.lower()))
 
             if field_type == FieldDescriptor.TYPE_MESSAGE:
-                lines.append('LUA_PROTOBUF_EXPORT int %s%s_add_%s(lua_State *L);' % ( function_prefix, message_name, field_name))
+                lines.append('LUA_PROTOBUF_EXPORT int %s%s_add_%s(lua_State *L);' % ( function_prefix, message_name, field_name.lower()))
 
         lines.append('')
 
@@ -890,6 +1304,7 @@ def message_source(package, message_descriptor):
     lines.extend(message_pushreference_function(package, message))
     lines.extend(new_message(package, message))
     lines.extend(parsefromstring_message_function(package, message))
+    lines.extend(descriptor_message_function(package, message, message_descriptor))
     lines.extend(gc_message_function(package, message))
     lines.extend(clear_message_function(package, message))
     lines.extend(serialized_message_function(package, message))
@@ -1016,11 +1431,11 @@ def file_source(file_descriptor):
     package = file_descriptor.package
 
     lines = []
-    lines.extend(source_header(filename, package))
+    lines.extend(source_header(filename, package, file_descriptor))
     lines.append('using ::std::string;\n')
 
     lines.extend([
-        'int %sopen(lua_State *L)' % package_function_prefix(package),
+        'int %sopen(lua_State *L)' % proto_function_open_name(filename),
         '{',
     ])
 
@@ -1035,13 +1450,13 @@ def file_source(file_descriptor):
     # we probably shouldn't rely on an "internal" API, so
     # TODO don't use internal API call
     lines.extend([
-        'const char *table = luaL_findtable(L, LUA_GLOBALSINDEX, "protobuf.%s", 1);' % package,
+        'luaL_checktype(L, -1, LUA_TTABLE);',
+        'const char *table = luaEXT_findtable(L, "%s", -1, 1);' % package,
         'if (table) {',
             'return luaL_error(L, "could not create parent Lua tables");',
         '}',
         'if (!lua_istable(L, -1)) {',
-            'lua_newtable(L);',
-            'lua_setfield(L, -2, "%s");' % package,
+            'return luaL_error(L, "could not create parent Lua tables");',
         '}',
     ])
 
@@ -1053,14 +1468,14 @@ def file_source(file_descriptor):
         'lua_pop(L, 1);',
 
         # and we register this package as a module, complete with enumerations
-        'luaL_Reg funcs [] = { { NULL, NULL } };',
-        'luaL_register(L, "protobuf.%s", funcs);' % package,
+        #'luaL_Reg funcs [] = { { NULL, NULL } };',
+        #'luaL_register(L, "protobuf.%s", funcs);' % package,
     ])
 
     for descriptor in file_descriptor.message_type:
         lines.append('%s(L);' % message_open_function_name(package, descriptor.name))
 
-    lines.append('return 1;')
+    lines.append('return 0;')
     lines.append('}')
     lines.append('\n')
 

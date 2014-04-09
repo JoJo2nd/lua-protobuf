@@ -1,3 +1,8 @@
+This is a modified version of the original source found here (https://github.com/indygreg/lua-protobuf).
+It was a little old and didn't work so well with Lua 5.2. I have updated it and fixed a few minor things (includes not working fully, silly windows issues)
+
+===================================================================================================================
+
 lua-protobuf provides a Lua interface to Google's [Protocol Buffers](http://code.google.com/apis/protocolbuffers/).
 
 # Producing Code
