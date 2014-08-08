@@ -129,10 +129,13 @@ int lua_protobuf_gc_always_free(::google::protobuf::MessageLite *msg, void *ud)
 #include "google/protobuf/io/zero_copy_stream_impl.h"
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include <fcntl.h>
+#include <sys/stat.h>
 
 #if defined (_MSC_VER)
 #   include <io.h> // for open
-#   include <sys/stat.h> // for open
+#else
+#   include <sys/types.h>
+#   define O_BINARY (0)
 #endif
 
 //////////////////////////////////////////////////////////////////////////
@@ -671,24 +674,24 @@ def field_get(package, message, field_descriptor):
         # this is the Lua way
         if type == FieldDescriptor.TYPE_STRING or type == FieldDescriptor.TYPE_BYTES:
             lines.append('string s = m->%s();' % name.lower())
-            lines.append('m->has_%s() ? lua_pushlstring(L, s.c_str(), s.size()) : lua_pushnil(L);' % name.lower())
+            lines.append('if (m->has_%s()) lua_pushlstring(L, s.c_str(), s.size()); else lua_pushnil(L);' % name.lower())
 
         elif type == FieldDescriptor.TYPE_BOOL:
-            lines.append('m->has_%s() ? lua_pushboolean(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
+            lines.append('if (m->has_%s()) lua_pushboolean(L, m->%s()); else lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type in [FieldDescriptor.TYPE_INT32, FieldDescriptor.TYPE_UINT32,
             FieldDescriptor.TYPE_FIXED32, FieldDescriptor.TYPE_SFIXED32, FieldDescriptor.TYPE_SINT32]:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
+            lines.append('if (m->has_%s()) lua_pushinteger(L, m->%s()); else lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type in [ FieldDescriptor.TYPE_INT64, FieldDescriptor.TYPE_UINT64,
             FieldDescriptor.TYPE_FIXED64, FieldDescriptor.TYPE_SFIXED64, FieldDescriptor.TYPE_SINT64]:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
+            lines.append('if (m->has_%s()) lua_pushinteger(L, m->%s()); else lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_FLOAT or type == FieldDescriptor.TYPE_DOUBLE:
-            lines.append('m->has_%s() ? lua_pushnumber(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
+            lines.append('if (m->has_%s()) lua_pushnumber(L, m->%s()); else lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_ENUM:
-            lines.append('m->has_%s() ? lua_pushinteger(L, m->%s()) : lua_pushnil(L);' % ( name.lower(), name.lower() ))
+            lines.append('if (m->has_%s()) lua_pushinteger(L, m->%s()); else lua_pushnil(L);' % ( name.lower(), name.lower() ))
 
         elif type == FieldDescriptor.TYPE_MESSAGE:
             lines.extend([
