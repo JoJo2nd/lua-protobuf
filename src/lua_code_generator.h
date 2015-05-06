@@ -68,6 +68,9 @@ class LuaCodeGenerator : public CodeGenerator {
   LuaCodeGenerator();
   virtual ~LuaCodeGenerator();
 
+  bool GenerateCommonFiles(const string& parameter,
+						   GeneratorContext* context,
+						   string* error);
   virtual bool Generate(const FileDescriptor* file,
                         const string& parameter,
                         GeneratorContext* context,

@@ -73,12 +73,416 @@ LuaCodeGenerator::LuaCodeGenerator()
 
 LuaCodeGenerator::~LuaCodeGenerator() {}
 
+
+bool LuaCodeGenerator::GenerateCommonFiles(const string& parameter, GeneratorContext* context, string* error) {
+	//Output Common Code
+	{
+		std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open("proto_lua.h"));
+
+		io::Printer printer(output.get(), '$');
+static const char* header_str = 
+"\
+#ifndef LUA_PROTOBUF_H\n\
+#define LUA_PROTOBUF_H\n\
+\n\
+#include <google/protobuf/message.h>\n\
+\n\
+#ifdef __cplusplus\n\
+extern \"C\" {\n\
+#endif\n\
+\n\
+#include <lua.h>\n\
+\n\
+#ifdef WINDOWS\n\
+#define LUA_PROTOBUF_EXPORT __declspec(dllexport)\n\
+#else\n\
+#define LUA_PROTOBUF_EXPORT\n\
+#endif\n\
+\n\
+	// type for callback function that is executed before Lua performs garbage\n\
+	// collection on a message instance.\n\
+	// if called function returns 1, Lua will free the memory backing the object\n\
+	// if returns 0, Lua will not free the memory\n\
+	typedef int(*lua_protobuf_gc_callback)(::google::protobuf::MessageLite *msg, void *userdata);\n\
+\n\
+	// __index and __newindex functions for enum tables\n\
+	LUA_PROTOBUF_EXPORT int lua_protobuf_enum_index(lua_State *L);\n\
+	LUA_PROTOBUF_EXPORT int lua_protobuf_enum_newindex(lua_State *L);\n\
+\n\
+	// GC callback function that always returns true\n\
+	LUA_PROTOBUF_EXPORT int lua_protobuf_gc_always_free(::google::protobuf::MessageLite *msg, void *userdata);\n\
+\n\
+	// A minimal Lua interface for coded input/output protobuf streams\n\
+	int lua_protobuf_coded_streams_open(lua_State* L);\n\
+\n\
+#ifdef __cplusplus\n\
+}\n\
+#endif\n\
+\n\
+#endif\n\
+";
+		printer.PrintRaw(header_str);
+	}
+	{
+		std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open("proto_lua.cpp"));
+
+		io::Printer printer(output.get(), '$');
+static const char* cpp_str =
+"\
+\n\
+#include \"lua-protobuf.h\"\n\
+\n\
+#ifdef __cplusplus\n\
+extern \"C\" {\n\
+#endif\n\
+\n\
+#include <lauxlib.h>\n\
+\n\
+#ifdef __cplusplus\n\
+}\n\
+#endif\n\
+\n\
+int lua_protobuf_enum_index(lua_State *L)\n\
+{\n\
+	return luaL_error(L, \"attempting to access undefined enumeration value: %s\", lua_tostring(L, 2));\n\
+}\n\
+\n\
+int lua_protobuf_enum_newindex(lua_State *L)\n\
+{\n\
+	return luaL_error(L, \"cannot modify enumeration tables\");\n\
+}\n\
+\n\
+int lua_protobuf_gc_always_free(::google::protobuf::MessageLite *msg, void *ud)\n\
+{\n\
+	return 1;\n\
+}\n\
+\n\
+#include \"google/protobuf/io/coded_stream.h\"\n\
+#include \"google/protobuf/io/zero_copy_stream_impl.h\"\n\
+#include \"google/protobuf/io/zero_copy_stream_impl_lite.h\"\n\
+#include <fcntl.h>\n\
+#include <sys/stat.h>\n\
+\n\
+#if defined (_MSC_VER)\n\
+#   include <io.h> // for open\n\
+#else\n\
+#   include <sys/types.h>\n\
+#   define O_BINARY (0)\n\
+#endif\n\
+\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+\n\
+int lua_protobuf_coded_input_stream_new(lua_State* L) {\n\
+	const char* filepath = luaL_checkstring(L, 1);\n\
+	int fd = open(filepath, O_RDONLY | O_BINARY, S_IREAD);\n\
+	if (fd == -1) {\n\
+		return luaL_error(L, \"Failed to open file %s\", filepath);\n\
+	}\n\
+	char* udataptr = (char*)lua_newuserdata(L, sizeof(::google::protobuf::io::CodedInputStream) + sizeof(::google::protobuf::io::FileInputStream));\n\
+	auto instream = new (udataptr + sizeof(::google::protobuf::io::FileInputStream)) ::google::protobuf::io::FileInputStream(fd);\n\
+	instream->SetCloseOnDelete(true);\n\
+	auto codestream = new (udataptr) ::google::protobuf::io::CodedInputStream(instream);\n\
+	luaL_setmetatable(L, \"protobuf_.CodedInputStream\");\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_gc(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	::google::protobuf::io::FileInputStream* filestream = (::google::protobuf::io::FileInputStream*)(codestream + 1);\n\
+	codestream->~CodedInputStream();\n\
+	filestream->~FileInputStream();\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_skip(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	int count = luaL_checkint(L, 2);\n\
+	codestream->Skip(count);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_push_limit(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	int limit = luaL_checkint(L, 2);\n\
+	limit = codestream->PushLimit(limit);\n\
+	lua_pushinteger(L, limit);\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_pop_limit(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	int limit = luaL_checkint(L, 2);\n\
+	codestream->PopLimit(limit);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_current_position(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	lua_pushinteger(L, codestream->CurrentPosition());\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_read_raw(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	int count = luaL_checkint(L, 2);\n\
+	char* buf = new char[count];\n\
+	bool success = codestream->ReadRaw(buf, count);\n\
+	if (success) {\n\
+		lua_pushlstring(L, buf, count);\n\
+	}\n\
+	else {\n\
+		lua_pushnil(L);\n\
+	}\n\
+	delete buf;\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_read_varint_32(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	::google::protobuf::uint32 val;\n\
+	bool success = codestream->ReadVarint32(&val);\n\
+	lua_pushboolean(L, success);\n\
+	if (success) {\n\
+		lua_pushinteger(L, val);\n\
+	}\n\
+	else {\n\
+		lua_pushnil(L);\n\
+	}\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_read_varint_64(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	::google::protobuf::uint64 val;\n\
+	bool success = codestream->ReadVarint64(&val);\n\
+	lua_pushboolean(L, success);\n\
+	if (success) {\n\
+		lua_pushinteger(L, val);\n\
+	}\n\
+	else {\n\
+		lua_pushnil(L);\n\
+	}\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_read_little_endian_32(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	::google::protobuf::uint32 val;\n\
+	bool success = codestream->ReadLittleEndian32(&val);\n\
+	lua_pushboolean(L, success);\n\
+	if (success) {\n\
+		lua_pushinteger(L, val);\n\
+	}\n\
+	else {\n\
+		lua_pushnil(L);\n\
+	}\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_input_stream_read_little_endian_64(lua_State* L) {\n\
+	::google::protobuf::io::CodedInputStream* codestream = (::google::protobuf::io::CodedInputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedInputStream\");\n\
+	::google::protobuf::uint64 val;\n\
+	bool success = codestream->ReadLittleEndian64(&val);\n\
+	lua_pushboolean(L, success);\n\
+	if (success) {\n\
+		lua_pushinteger(L, val);\n\
+	}\n\
+	else {\n\
+		lua_pushnil(L);\n\
+	}\n\
+	return 1;\n\
+}\n\
+\n\
+static const struct luaL_Reg CodedInputStream_functions[] = {\n\
+		{ \"new\", lua_protobuf_coded_input_stream_new },\n\
+		{ NULL, NULL }\n\
+};\n\
+\n\
+static const struct luaL_Reg CodedInputStream_methods[] = {\n\
+		{ \"__gc\", lua_protobuf_coded_input_stream_gc },\n\
+		{ \"Skip\", lua_protobuf_coded_input_stream_skip },\n\
+		{ \"PushLimit\", lua_protobuf_coded_input_stream_push_limit },\n\
+		{ \"PopLimit\", lua_protobuf_coded_input_stream_pop_limit },\n\
+		{ \"CurrentPosition\", lua_protobuf_coded_input_stream_current_position },\n\
+		{ \"ReadRaw\", lua_protobuf_coded_input_stream_read_raw },\n\
+		{ \"ReadVarint32\", lua_protobuf_coded_input_stream_read_varint_32 },\n\
+		{ \"ReadVarint64\", lua_protobuf_coded_input_stream_read_varint_64 },\n\
+		{ \"ReadLittleEndian32\", lua_protobuf_coded_input_stream_read_little_endian_32 },\n\
+		{ \"ReadLittleEndian64\", lua_protobuf_coded_input_stream_read_little_endian_64 },\n\
+		{ NULL, NULL },\n\
+};\n\
+\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+\n\
+int lua_protobuf_coded_output_stream_new(lua_State* L) {\n\
+	const char* filepath = luaL_checkstring(L, 1);\n\
+	int fd = open(filepath, O_WRONLY | O_TRUNC | O_CREAT | O_BINARY, S_IREAD | S_IWRITE);\n\
+	if (fd == -1) {\n\
+		return luaL_error(L, \"Failed to open file %s\", filepath);\n\
+	}\n\
+	char* udataptr = (char*)lua_newuserdata(L, sizeof(::google::protobuf::io::CodedOutputStream) + sizeof(::google::protobuf::io::FileOutputStream));\n\
+	auto outstream = new(udataptr + sizeof(::google::protobuf::io::CodedOutputStream)) ::google::protobuf::io::FileOutputStream(fd);\n\
+	outstream->SetCloseOnDelete(true);\n\
+	auto codestream = new (udataptr) ::google::protobuf::io::CodedOutputStream(outstream);\n\
+	luaL_setmetatable(L, \"protobuf_.CodedOutputStream\");\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_gc(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	::google::protobuf::io::FileOutputStream* filestream = (::google::protobuf::io::FileOutputStream*)(codestream + 1);\n\
+	codestream->~CodedOutputStream();\n\
+	filestream->~FileOutputStream();\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_skip(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	int count = luaL_checkint(L, 2);\n\
+	codestream->Skip(count);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_byte_count(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	lua_pushinteger(L, codestream->ByteCount());\n\
+	return 1;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_write_raw(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	size_t count;\n\
+	const char* buf = luaL_checklstring(L, 2, &count);\n\
+	codestream->WriteRaw(buf, (int)count);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_write_varint_32(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	::google::protobuf::uint32 val = luaL_checkunsigned(L, 2);\n\
+	codestream->WriteVarint32(val);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_write_varint_64(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	::google::protobuf::uint64 val = luaL_checkunsigned(L, 2);\n\
+	codestream->WriteVarint64(val);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_write_little_endian_32(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	::google::protobuf::uint32 val = luaL_checkunsigned(L, 2);\n\
+	codestream->WriteLittleEndian32(val);\n\
+	return 0;\n\
+}\n\
+\n\
+int lua_protobuf_coded_output_stream_write_little_endian_64(lua_State* L) {\n\
+	::google::protobuf::io::CodedOutputStream* codestream = (::google::protobuf::io::CodedOutputStream*)luaL_checkudata(L, 1, \"protobuf_.CodedOutputStream\");\n\
+	::google::protobuf::uint64 val = luaL_checkunsigned(L, 2);\n\
+	codestream->WriteLittleEndian64(val);\n\
+	return 0;\n\
+}\n\
+\n\
+static const struct luaL_Reg CodedOutputStream_functions[] = {\n\
+		{ \"new\", lua_protobuf_coded_output_stream_new },\n\
+		{ NULL, NULL }\n\
+};\n\
+\n\
+static const struct luaL_Reg CodedOutputStream_methods[] = {\n\
+		{ \"__gc\", lua_protobuf_coded_output_stream_gc },\n\
+		{ \"Skip\", lua_protobuf_coded_output_stream_skip },\n\
+		{ \"ByteCount\", lua_protobuf_coded_output_stream_byte_count },\n\
+		{ \"WriteRaw\", lua_protobuf_coded_output_stream_write_raw },\n\
+		{ \"WriteVarint32\", lua_protobuf_coded_output_stream_write_varint_32 },\n\
+		{ \"WriteVarint64\", lua_protobuf_coded_output_stream_write_varint_64 },\n\
+		{ \"WriteLittleEndian32\", lua_protobuf_coded_output_stream_write_little_endian_32 },\n\
+		{ \"WriteLittleEndian64\", lua_protobuf_coded_output_stream_write_little_endian_64 },\n\
+		{ NULL, NULL },\n\
+};\n\
+\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+//////////////////////////////////////////////////////////////////////////\n\
+\n\
+static const struct luaL_Reg CodedInputStream_lib_functions[] = {\n\
+		{ NULL, NULL }\n\
+};\n\
+\n\
+int lua_protobuf_coded_streams_open(lua_State* L) {\n\
+	luaL_checktype(L, -1, LUA_TTABLE);\n\
+\n\
+	luaL_newmetatable(L, \"protobuf_.CodedInputStream\");\n\
+	lua_pushvalue(L, -1);\n\
+	lua_setfield(L, -2, \"__index\");\n\
+	luaL_setfuncs(L, CodedInputStream_methods, 0);\n\
+	lua_pop(L, 1);//pop the metatable\n\
+\n\
+	luaL_newmetatable(L, \"protobuf_.CodedOutputStream\");\n\
+	lua_pushvalue(L, -1);\n\
+	lua_setfield(L, -2, \"__index\");\n\
+	luaL_setfuncs(L, CodedOutputStream_methods, 0);\n\
+	lua_pop(L, 1);//pop the metatable\n\
+\n\
+	// add create funcs and tables\n\
+	luaL_newlib(L, CodedInputStream_functions);\n\
+	lua_setfield(L, -2, \"CodedInputStream\");\n\
+	luaL_newlib(L, CodedOutputStream_functions);\n\
+	lua_setfield(L, -2, \"CodedOutputStream\");\n\
+	return 0;\n\
+}\n\
+#ifdef __cplusplus\n\
+extern \"C\" {\n\
+#endif\n\
+\n\
+	const char *luaEXT_findtable(lua_State *L, const char *fname, int idx, int szhint) {\n\
+		const char *e;\n\
+		if (idx) lua_pushvalue(L, idx);\n\
+		do {\n\
+			e = strchr(fname, '.');\n\
+			if (e == NULL) e = fname + strlen(fname);\n\
+			lua_pushlstring(L, fname, e - fname);\n\
+			lua_rawget(L, -2);\n\
+			if (lua_isnil(L, -1)) {  /* no such field? */\n\
+				lua_pop(L, 1);  /* remove this nil */\n\
+				lua_createtable(L, 0, (*e == '.' ? 1 : szhint)); /* new table for field */\n\
+				lua_pushlstring(L, fname, e - fname);\n\
+				lua_pushvalue(L, -2);\n\
+				lua_settable(L, -4);  /* set new table into field */\n\
+			}\n\
+			else if (!lua_istable(L, -1)) {  /* field has a non-table value? */\n\
+				lua_pop(L, 2);  /* remove table and value */\n\
+				return fname;  /* return problematic part of the name */\n\
+			}\n\
+			lua_remove(L, -2);  /* remove previous table */\n\
+			fname = e + 1;\n\
+		} while (*e == '.');\n\
+		return NULL;\n\
+	}\n\
+\n\
+#ifdef __cplusplus\n\
+}\n\
+#endif\n\
+";
+		printer.PrintRaw(cpp_str);
+	}
+
+	return true;
+}
+
 string LuaCodeGenerator::GetOutputFileName(const string& generator_name, const FileDescriptor* file) {
     return GetOutputFileName(generator_name, file->name());
 }
 
 string LuaCodeGenerator::GetOutputFileName(const string& generator_name, const string& file) {
-    return file + generator_name;
+	auto newfilename = file;
+	newfilename.replace(newfilename.find(".proto"), string::npos, generator_name);
+    return newfilename;
 }
 
 bool LuaCodeGenerator::Generate(
@@ -86,6 +490,7 @@ bool LuaCodeGenerator::Generate(
     const string& parameter,
     GeneratorContext* context,
     string* error) const {
+
     {
     std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open(GetOutputFileName("pb.lua.h", file)));
 
