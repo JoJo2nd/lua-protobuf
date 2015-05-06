@@ -914,6 +914,17 @@ def message_pushcopy_function(package, message):
         '}',
     ]
 
+def message_getcopy_function(package, message):
+    '''Returns function definition for getting a copy of a message from the stack'''
+
+    return [
+        'void %sgetcopy(lua_State *L, int index, %s &to)' % ( message_function_prefix(package, message), cpp_class(package, message) ),
+        '{',
+        'msg_udata * ud = (msg_udata *)luaL_checkudata(L, index, "%s")' % ( metatable(package, message) ),
+        'to->CopyFrom(*ud->msg);',
+        '}',
+    ]
+
 def message_pushreference_function(package, message):
     '''Returns function definition for pushing a reference of a message on the stack'''
 
@@ -1228,6 +1239,11 @@ def message_header(package, message_descriptor):
         '// Lua will free the memory. If false (0), Lua will not free the memory.',
         'LUA_PROTOBUF_EXPORT bool %s%s_pushreference(lua_State *L, %s *msg, lua_protobuf_gc_callback callback, void *data);' % ( function_prefix, message_name, c ),
         '',
+        '// get a copy of the message from the Lua stack',
+        '// caller is free to use the new message however she wants, but changes will not',
+        '// be reflected in Lua and vice-verse',
+        'LUA_PROTOBUF_EXPORT bool %s%s_getcopy(lua_State *L, int index, %s &msg);' % ( function_prefix, message_name, c),
+        '',
         '',
         '// The following functions are called by Lua. Many people will not need them,',
         '// but they are exported for those that do.',
@@ -1305,6 +1321,7 @@ def message_source(package, message_descriptor):
     lines.extend(message_open_function(package, message_descriptor))
     lines.extend(message_pushcopy_function(package, message))
     lines.extend(message_pushreference_function(package, message))
+    lines.extend(message_getcopy_function(package, message))
     lines.extend(new_message(package, message))
     lines.extend(parsefromstring_message_function(package, message))
     lines.extend(descriptor_message_function(package, message, message_descriptor))
