@@ -44,6 +44,7 @@
 //#include <gtest/gtest.h>
 #include <google/protobuf/stubs/stl_util.h>
 #include <iostream>
+#include <algorithm>
 
 #define EXPECT_EQ(...)
 
@@ -492,20 +493,58 @@ bool LuaCodeGenerator::Generate(
     string* error) const {
 
     {
-    std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open(GetOutputFileName("pb.lua.h", file)));
+    std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open(GetOutputFileName(".pb.lua.h", file)));
 
     io::Printer printer(output.get(), '$');
-    printer.PrintRaw("//Output some code header code here\n"/*GetOutputFileContent(name_, parameter,file, context)*/);
-    printer.PrintRaw(kFirstInsertionPoint);
-    printer.PrintRaw(kSecondInsertionPoint);
+	for (auto i=0, n=file->message_type_count(); i < n; ++i) {
+		auto* message_desc = file->message_type(i);
+		string package = file->package();
+		string cpp_classname = file->package() + "::" + message_desc->name();
+		std::replace(package.begin(), package.end(), '.', '_');
+        size_t loc = 0;
+		while (loc = cpp_classname.find(".", loc)) {
+            if(loc == string::npos) {
+                break;
+            }
+            cpp_classname.replace(loc, 1, "::");
+        }
+		map<string, string> parameters;
+		parameters["message_name"] = message_desc->name();
+		parameters["function_prefix"] = string("lua_protobuf_") + package + string("_");
+		parameters["cpp_class"] = cpp_classname;
+		parameters["todo"] = "!?!fix_me!?!";
+		printer.Print(parameters,
+"\n\
+// registers the message type with Lua\n\
+LUA_PROTOBUF_EXPORT int $function_prefix$$message_name$_open(lua_State *L);\n\
+\n\
+// push a copy of the message to the Lua stack\n\
+// caller is free to use original message however she wants, but changes will not\n\
+// be reflected in Lua and vice-verse\n\
+LUA_PROTOBUF_EXPORT bool $function_prefix$$message_name$_pushcopy(lua_State *L, const $cpp_class$ &msg);\n\
+\n\
+// push a reference of the message to the Lua stack\n\
+// the 3rd and 4th arguments define a callback that can be invoked just before Lua\n\
+// garbage collects the message. If the 3rd argument is NULL, Lua will *NOT* free\n\
+// memory. If the second argument points to a function, that function is called when\n\
+// Lua garbage collects the object. The function is sent a pointer to the message being\n\
+// collected and the 4th argument to this function. If the function returns true,\n\
+// Lua will free the memory. If false (0), Lua will not free the memory.\n\
+LUA_PROTOBUF_EXPORT bool $function_prefix$$message_name$_pushreference(lua_State *L, $cpp_class$ *msg, lua_protobuf_gc_callback callback, void *data);\n\
+\n\
+// get a copy of the message from the Lua stack\n\
+// caller is free to use the new message however she wants, but changes will not\n\
+// be reflected in Lua and vice-verse\n\
+LUA_PROTOBUF_EXPORT bool $function_prefix$$message_name$_getcopy(lua_State *L, int index, $cpp_class$ &msg);\n\
+"
+		);
+	}
     }
     {
-    std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open(GetOutputFileName("pb.lua.cc", file)));
+    std::unique_ptr<io::ZeroCopyOutputStream> output(context->Open(GetOutputFileName(".pb.lua.cc", file)));
 
     io::Printer printer(output.get(), '$');
     printer.PrintRaw("//Output some code cpp code here\n"/*GetOutputFileContent(name_, parameter,file, context)*/);
-    printer.PrintRaw(kFirstInsertionPoint);
-    printer.PrintRaw(kSecondInsertionPoint);
     }
     return true;
 #if 0
