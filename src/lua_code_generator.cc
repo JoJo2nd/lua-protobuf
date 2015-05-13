@@ -22,6 +22,13 @@ namespace google {
 namespace protobuf {
 namespace compiler {
 
+static const char* getLabelString(FieldDescriptor::Label l) {
+    if (l == FieldDescriptor::LABEL_OPTIONAL) return "optional";
+    else if (l == FieldDescriptor::LABEL_REPEATED) return "repeated";
+    else if (l == FieldDescriptor::LABEL_REQUIRED) return "required";
+    return "";
+}
+
 LuaCodeGenerator::LuaCodeGenerator()
 {}
 
@@ -639,40 +646,8 @@ LUA_PROTOBUF_EXPORT int $function_prefix$$message_name$_set_$field_name_lower$(l
     for (auto i=0, n=file->enum_type_count(); i<n; ++i) {
         // Create a read only table in Lua for enum values.
         auto* enum_desc = file->enum_type(i);
-        parameters["enum_name"] = enum_desc->name();
-        printer.Print(parameters,
-        "// $enum_name$ enum\n"
-        "lua_newtable(L); // proxy table\n"
-        "lua_newtable(L); // main table\n");
-        for (auto ei=0, en=enum_desc->value_count(); ei < en; ++ei) {
-            stringstream ss;
-            ss << enum_desc->value(ei)->number();
-            parameters["enum_value_name"] = enum_desc->value(ei)->name();
-            parameters["enum_value"] = ss.str();;
-            printer.Print(parameters, 
-            "lua_pushnumber(L, $enum_value$);\n"
-            "lua_setfield(L, -2, \"$enum_value_name$\");\n");
-        }
+        generateEnumTable(parameters, enum_desc, printer);
 
-        printer.Print(parameters,
-        "// define metatable on main table\n"
-        "lua_newtable(L);\n"
-        "lua_pushcfunction(L, lua_protobuf_enum_index);\n"
-        "lua_setfield(L, -2, \"__index\");\n"
-        "lua_setmetatable(L, -2);\n"
-        "// define metatable on proxy table\n"
-        "lua_newtable(L);\n"
-        // proxy meta : -1; main: -2; proxy: -3
-        "lua_pushvalue(L, -2);\n"
-        "lua_setfield(L, -2, \"__index\");\n"
-        "lua_pushcfunction(L, lua_protobuf_enum_newindex);\n"
-        "lua_setfield(L, -2, \"__newindex\");\n"
-        "lua_remove(L, -2);\n"
-        "lua_setmetatable(L, -2);\n"
-        // proxy at top of stack now
-        // assign to appropriate module
-        "lua_setfield(L, -2, \"$enum_name$\");\n"
-        "// end $enum_name$ enum\n");
     }
     printer.Print(parameters,
         "lua_pop(L, 1);\n");
@@ -719,7 +694,7 @@ LUA_PROTOBUF_EXPORT int $function_prefix$$message_name$_set_$field_name_lower$(l
             auto* field = message_desc->field(fi);
             parameters["field_name"] = field->name();
             parameters["field_name_lower"] = field->name();
-            parameters["field_label"] = field->label();
+            parameters["field_label"] = getLabelString(field->label());
             parameters["field_type"] = field->cpp_type_name();
             std::transform(parameters["field_name_lower"].begin(), parameters["field_name_lower"].end(), parameters["field_name_lower"].begin(), tolower);
             printer.Print(parameters,
@@ -740,12 +715,245 @@ LUA_PROTOBUF_EXPORT int $function_prefix$$message_name$_set_$field_name_lower$(l
         printer.Outdent();
         printer.Print(parameters, "{NULL, NULL},\n");
         printer.Print(parameters, "};\n");
+
+        //open function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_open(lua_State *L)\n"
+            "{\n");
+        printer.Indent();
+        printer.Print(parameters,
+            "luaL_checktype(L, -1, LUA_TTABLE);\n"
+            "luaL_newmetatable(L, \"protobuf_.$dotted_package$.$message_name$\");\n"
+            "lua_pushvalue(L, -1);\n"
+            "lua_setfield(L, -2, \"__index\");\n"
+            "luaL_setfuncs(L, $message_name$_methods, 0);\n"
+            "lua_pop(L, 1); // remove the metatable\n"
+            "if (luaEXT_findtable(L, \"$dotted_package$\", -1, 1)) { \n"
+            "  return luaL_error(L, \"Error finding correct table\");\n"
+            "}\n"
+            "luaL_newlib(L, $message_name$_functions);\n"
+            "lua_setfield(L, -2, \"$message_name$\");\n"
+            "lua_pop(L, 1); //remove the returned table from findtable\n" );
+
+        for (auto ei=0, en=message_desc->enum_type_count(); ei<en; ++ei) {
+            auto* enum_desc = message_desc->enum_type(ei);
+            generateEnumTable(parameters, enum_desc, printer);
+        }
+        printer.PrintRaw("return 0;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //pushcopy function
+        printer.Print(parameters, 
+            "bool $function_prefix$$message_name$_pushcopy(lua_State *L, const $cpp_class$ &from)\n"
+            "{\n");
+        printer.Indent();
+        printer.Print(parameters, 
+            "msg_udata * ud = (msg_udata *)lua_newuserdata(L, sizeof(msg_udata));\n"
+            "ud->lua_owns = true;\n"
+            "ud->msg = new $cpp_class$(from);\n"
+            "ud->gc_callback = NULL;\n"
+            "ud->callback_data = NULL;\n"
+            "luaL_getmetatable(L, \"protobuf_.$dotted_package$.$message_name$\");\n"
+            "lua_setmetatable(L, -2);\n"
+            "return true;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //pushreference function
+        printer.Print(parameters,
+            "bool $function_prefix$$message_name$_pushreference(lua_State *L, $cpp_class$ *msg, lua_protobuf_gc_callback f, void *data)\n"
+            "{\n");
+        printer.Indent();
+        printer.Print(parameters,
+            "msg_udata * ud = (msg_udata *)lua_newuserdata(L, sizeof(msg_udata));\n"
+            "ud->lua_owns = false;\n"
+            "ud->msg = msg;\n"
+            "ud->gc_callback = f;\n"
+            "ud->callback_data = data;\n"
+            "luaL_getmetatable(L, \"protobuf_.$dotted_package$.$message_name$\");\n"
+            "lua_setmetatable(L, -2);\n"
+            "return true;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //new message function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_new(lua_State *L)\n"
+            "{\n");
+        printer.Indent();
+        printer.Print(parameters,
+            "msg_udata * ud = (msg_udata *)lua_newuserdata(L, sizeof(msg_udata));\n"
+            "ud->lua_owns = true;\n"
+            "ud->msg = new $cpp_class$();\n"
+            "ud->gc_callback = NULL;\n"
+            "ud->callback_data = NULL;\n"
+            "luaL_getmetatable(L, \"protobuf_.$dotted_package$.$message_name$\");\n"
+            "lua_setmetatable(L, -2);\n"
+            "return 1;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //parsefromstring message function
+        printer.Print(parameters, 
+            "int $function_prefix$$message_name$_parsefromstring(lua_State* L)\n"
+            "{\n");
+        printer.Indent();
+        printer.Print(parameters, 
+            "if (lua_gettop(L) != 1) {\n"
+            "  return luaL_error(L, \"parsefromstring() requires a string argument. none given\");\n"
+            "}\n"
+            "size_t len;\n"
+            "const char *s = luaL_checklstring(L, -1, &len);\n"
+            "$cpp_class$* msg = new $cpp_class$();\n"
+            "if (!msg->ParseFromArray((const void *)s, len)) {\n"
+            "  delete msg\n"
+            "  return luaL_error(L, \"error deserializing message\");\n"
+            "}\n"
+            "msg_udata * ud = (msg_udata *)lua_newuserdata(L, sizeof(msg_udata));\n"
+            "ud->lua_owns = true;\n"
+            "ud->msg = msg;\n"
+            "ud->gc_callback = NULL;\n"
+            "ud->callback_data = NULL;\n"
+            "luaL_getmetatable(L, \"protobuf_.$dotted_package$.$message_name$\");\n"
+            "lua_setmetatable(L, -2);\n"
+            "return 1;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        // descriptor_message_function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_descriptor(lua_State* L)\n"
+            "{\n");
+        printer.Indent();
+        printer.PrintRaw("lua_newtable(L);\n");
+        for (auto fi = 0, fn = message_desc->field_count(); fi < fn; ++fi) {
+            auto* field = message_desc->field(fi);
+            stringstream ss;
+            ss << field->number();
+            parameters["field_name"] = field->name();
+            parameters["field_name_lower"] = field->name();
+            parameters["field_label"] = getLabelString(field->label());
+            parameters["field_type"] = field->cpp_type_name();
+            parameters["field_number"] = ss.str();
+            std::transform(parameters["field_name_lower"].begin(), parameters["field_name_lower"].end(), parameters["field_name_lower"].begin(), tolower);
+            printer.Print(parameters,
+                "// Field: default_value = $todo$\n"
+                "lua_newtable(L);\n"
+                "lua_pushstring(L, \"$field_name$\");\n"
+                "lua_setfield(L, -2, \"name\");\n"
+                "lua_pushstring(L, \"$field_label$\");\n"
+                "lua_setfield(L, -2, \"label\");\n"
+                "lua_pushnumber(L, $field_number$);\n"
+                "lua_setfield(L, -2, \"number\");\n"
+                "lua_pushstring(L, \"$field_type$\");\n"
+                "lua_setfield(L, -2, \"type\");\n"
+                "lua_setfield(L, -2, \"$field_name$\");\n");
+        }
+        printer.PrintRaw("return 1;");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //gc_message_function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_gc(lua_State* L)\n"
+            "{\n");
+        printer.Indent();
+        getMessageFromUData(parameters, printer, "1", "m");
+        printer.Print(parameters,
+            "if (mud->lua_owns) {\n"
+            "  delete mud->msg;\n"
+            "  mud->msg = NULL;\n"
+            "  return 0;\n"
+            "}\n"
+            "if (mud->gc_callback && mud->gc_callback(m, mud->callback_data)) {\n"
+            "  delete mud->msg;\n"
+            "  mud->msg = NULL;\n"
+            "  return 0;\n"
+            "}\n"
+            "return 0;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        //clear_message_function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_clear(lua_State* L)\n"
+            "{\n");
+        printer.Indent();
+        getMessageFromUData(parameters, printer, "1", "m");
+        printer.PrintRaw(
+            "m->Clear()\n"
+            "return 0;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
+
+        // serialized_message_function
+        printer.Print(parameters,
+            "int $function_prefix$$message_name$_serialized(lua_State* L)\n"
+            "{\n");
+        printer.Indent();
+        getMessageFromUData(parameters, printer, "1", "m");
+        printer.Print(parameters,
+            "string s;\n"
+            "if (!m->SerializeToString(&s)) {\n"
+            "return luaL_error(L, \"error serializing message\");\n"
+            "}\n"
+            "lua_pushlstring(L, s.c_str(), s.length());\n"
+            "lua_pushnumber(L, s.length());\n"
+            "return 2;\n");
+        printer.Outdent();
+        printer.PrintRaw("}\n");
     }
 
     }
     return true;
 }
 
+
+void LuaCodeGenerator::getMessageFromUData(map<string, string>& parameters, io::Printer& printer, const char* index, const char* varname) const {
+    parameters["index"] = index;
+    parameters["tmp_var"] = varname;
+    printer.Print(parameters,
+        "msg_udata * $tmp_var$ud = (msg_udata*)luaL_checkudata(L, $index$, \"protobuf_.$dotted_package$.$message_name$\");\n"
+        "$cpp_class$ *$tmp_var$ = ($cpp_class$*)$tmp_var$ud->msg;\n");
+}
+
+void LuaCodeGenerator::generateEnumTable(map<string, string>& parameters, const EnumDescriptor* enum_desc, io::Printer& printer) const {
+    parameters["enum_name"] = enum_desc->name();
+    printer.Print(parameters,
+        "// $enum_name$ enum\n"
+        "lua_newtable(L); // proxy table\n"
+        "lua_newtable(L); // main table\n");
+    for (auto ei = 0, en = enum_desc->value_count(); ei < en; ++ei) {
+        stringstream ss;
+        ss << enum_desc->value(ei)->number();
+        parameters["enum_value_name"] = enum_desc->value(ei)->name();
+        parameters["enum_value"] = ss.str();;
+        printer.Print(parameters,
+            "lua_pushnumber(L, $enum_value$);\n"
+            "lua_setfield(L, -2, \"$enum_value_name$\");\n");
+    }
+
+    printer.Print(parameters,
+        "// define metatable on main table\n"
+        "lua_newtable(L);\n"
+        "lua_pushcfunction(L, lua_protobuf_enum_index);\n"
+        "lua_setfield(L, -2, \"__index\");\n"
+        "lua_setmetatable(L, -2);\n"
+        "// define metatable on proxy table\n"
+        "lua_newtable(L);\n"
+        // proxy meta : -1; main: -2; proxy: -3
+        "lua_pushvalue(L, -2);\n"
+        "lua_setfield(L, -2, \"__index\");\n"
+        "lua_pushcfunction(L, lua_protobuf_enum_newindex);\n"
+        "lua_setfield(L, -2, \"__newindex\");\n"
+        "lua_remove(L, -2);\n"
+        "lua_setmetatable(L, -2);\n"
+        // proxy at top of stack now
+        // assign to appropriate module
+        "lua_setfield(L, -2, \"$enum_name$\");\n"
+        "// end $enum_name$ enum\n");
+}
 
 }  // namespace compiler
 }  // namespace protobuf
